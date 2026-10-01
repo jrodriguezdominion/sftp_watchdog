@@ -145,5 +145,31 @@ class HandlerMoveTests(unittest.TestCase):
             self.assertEqual(uploaded[0][1], "/r/b.txt")
 
 
+class ConfirmMissingHostKeyPolicyTests(unittest.TestCase):
+    def test_accepts_host_and_adds_key(self) -> None:
+        policy = wd._ConfirmMissingHostKeyPolicy(22)
+        client = mock.Mock()
+        host_keys = mock.Mock()
+        client.get_host_keys.return_value = host_keys
+        key = mock.Mock()
+        key.fingerprint = "SHA256:abc123"
+        key.get_name.return_value = "ssh-ed25519"
+
+        with mock.patch("builtins.input", return_value="s"):
+            policy.missing_host_key(client, "example.com", key)
+
+        host_keys.add.assert_called_once_with("example.com", "ssh-ed25519", key)
+
+    def test_rejects_host_raises(self) -> None:
+        policy = wd._ConfirmMissingHostKeyPolicy(2222)
+        client = mock.Mock()
+        key = mock.Mock()
+        key.fingerprint = "SHA256:def456"
+
+        with mock.patch("builtins.input", return_value="n"):
+            with self.assertRaises(paramiko.SSHException):
+                policy.missing_host_key(client, "host.example", key)
+
+
 if __name__ == "__main__":
     unittest.main()

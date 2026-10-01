@@ -197,7 +197,7 @@ class _ConfirmMissingHostKeyPolicy(paramiko.MissingHostKeyPolicy):
         self.port = port
 
     def missing_host_key(self, client, hostname, key):
-        fingerprint = paramiko.util.hexlify(key.get_fingerprint()).decode()
+        fingerprint = key.fingerprint
         label = f"[{hostname}]:{self.port}" if self.port != 22 else hostname
         print(f"\nHost desconocido: {label}")
         print(f"Huella: {fingerprint}")
