@@ -204,5 +204,37 @@ class ConfirmMissingHostKeyPolicyTests(unittest.TestCase):
                 policy.missing_host_key(client, "host.example", key)
 
 
+class ParseArgsTests(unittest.TestCase):
+    def test_skip_initial_sync(self) -> None:
+        args = wd.parse_args(["--skip-initial-sync"])
+        self.assertTrue(args.skip_initial_sync)
+
+    def test_log_every_default_and_override(self) -> None:
+        self.assertEqual(wd.parse_args([]).log_every, 1000)
+        self.assertEqual(wd.parse_args(["--log-every", "50"]).log_every, 50)
+
+
+class RunMirrorTests(unittest.TestCase):
+    def _run_until_interrupt(self, **kwargs) -> None:
+        session = mock.Mock()
+        with tempfile.TemporaryDirectory() as tmp:
+            local_root = Path(tmp)
+            mapper = wd.RemotePathMapper(local_root, "/remote")
+            with mock.patch("time.sleep", side_effect=KeyboardInterrupt):
+                wd.run_mirror(session, mapper, local_root, **kwargs)
+
+    def test_skip_initial_sync_does_not_call_initial_sync(self) -> None:
+        with mock.patch.object(wd, "initial_sync") as mock_sync:
+            self._run_until_interrupt(skip_initial_sync=True)
+        mock_sync.assert_not_called()
+
+    def test_runs_initial_sync_when_not_skipped(self) -> None:
+        with mock.patch.object(wd, "initial_sync") as mock_sync:
+            self._run_until_interrupt(skip_initial_sync=False, log_every=500)
+        mock_sync.assert_called_once()
+        _, kwargs = mock_sync.call_args
+        self.assertEqual(kwargs.get("log_every"), 500)
+
+
 if __name__ == "__main__":
     unittest.main()

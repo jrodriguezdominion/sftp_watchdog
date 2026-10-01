@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import errno
 import fnmatch
 import getpass
@@ -324,8 +325,18 @@ def remove_remote_recursive(sftp: SFTPClient, remote_path: str) -> None:
     sftp.rmdir(remote_path)
 
 
-def initial_sync(session: SftpSession, mapper: RemotePathMapper, local_root: Path) -> None:
+def initial_sync(
+    session: SftpSession,
+    mapper: RemotePathMapper,
+    local_root: Path,
+    *,
+    log_every: int = 1000,
+) -> None:
     log.info("Copia inicial de %s -> %s", local_root, mapper.remote_root)
+    if log_every < 1:
+        raise ValueError("log_every debe ser >= 1")
+
+    progress = {"uploaded": 0}
 
     def _sync(sftp: SFTPClient) -> None:
         ensure_remote_dir(sftp, mapper.remote_root)
@@ -341,11 +352,20 @@ def initial_sync(session: SftpSession, mapper: RemotePathMapper, local_root: Pat
                     continue
                 remote_file = mapper.remote_from_local(local_file)
                 if remote_file:
-                    log.info("Subiendo %s", local_file)
                     upload_file(sftp, local_file, remote_file)
+                    progress["uploaded"] += 1
+                    n = progress["uploaded"]
+                    if log_every == 1:
+                        log.info("Subiendo %s", local_file)
+                    elif n == 1 or n % log_every == 0:
+                        log.info(
+                            "Copia inicial: %s archivos subidos (último: %s)",
+                            n,
+                            local_file,
+                        )
 
     session.run(_sync)
-    log.info("Copia inicial completada.")
+    log.info("Copia inicial completada (%s archivos).", progress["uploaded"])
 
 
 class SftpMirrorHandler(FileSystemEventHandler):
@@ -496,7 +516,58 @@ class SftpMirrorHandler(FileSystemEventHandler):
             timer.cancel()
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Espejo local hacia SFTP con copia inicial opcional.",
+    )
+    parser.add_argument(
+        "--skip-initial-sync",
+        action="store_true",
+        help="Omitir copia inicial (p. ej. tras rsync masivo) e ir directo al vigilado.",
+    )
+    parser.add_argument(
+        "--log-every",
+        type=int,
+        default=1000,
+        metavar="N",
+        help="En la copia inicial, registrar progreso cada N archivos (1 = cada archivo).",
+    )
+    args = parser.parse_args(argv)
+    if args.log_every < 1:
+        parser.error("--log-every debe ser >= 1")
+    return args
+
+
+def run_mirror(
+    session: SftpSession,
+    mapper: RemotePathMapper,
+    local_root: Path,
+    *,
+    skip_initial_sync: bool = False,
+    log_every: int = 1000,
+) -> None:
+    if skip_initial_sync:
+        log.info("Copia inicial omitida (--skip-initial-sync).")
+    else:
+        initial_sync(session, mapper, local_root, log_every=log_every)
+    handler = SftpMirrorHandler(session, mapper)
+    observer = Observer()
+    observer.schedule(handler, str(local_root), recursive=True)
+    observer.start()
+    log.info("Vigilando %s (Ctrl+C para salir)", local_root)
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        log.info("Deteniendo...")
+    finally:
+        handler.cancel_pending_uploads()
+        observer.stop()
+        observer.join()
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
     print("=== Watchdog SFTP ===\n")
     local_root = prompt_local_path()
     remote_root = prompt_remote_path()
@@ -509,21 +580,13 @@ def main() -> None:
         except paramiko.SSHException as exc:
             log.error("%s", exc)
             sys.exit(1)
-        initial_sync(session, mapper, local_root)
-        handler = SftpMirrorHandler(session, mapper)
-        observer = Observer()
-        observer.schedule(handler, str(local_root), recursive=True)
-        observer.start()
-        log.info("Vigilando %s (Ctrl+C para salir)", local_root)
-        try:
-            while True:
-                time.sleep(1)
-        except KeyboardInterrupt:
-            log.info("Deteniendo...")
-        finally:
-            handler.cancel_pending_uploads()
-            observer.stop()
-            observer.join()
+        run_mirror(
+            session,
+            mapper,
+            local_root,
+            skip_initial_sync=args.skip_initial_sync,
+            log_every=args.log_every,
+        )
     finally:
         session.close()
 
