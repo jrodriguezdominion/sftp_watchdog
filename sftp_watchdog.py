@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import fnmatch
 import getpass
 import logging
@@ -183,6 +184,8 @@ class SftpSession:
                     assert self._sftp is not None
                     return fn(self._sftp, *args, **kwargs)
             except (OSError, paramiko.SSHException) as e:
+                if isinstance(e, OSError) and _is_permission_denied(e):
+                    raise
                 last_err = e
                 log.warning("Error SFTP (intento %s): %s", attempt + 1, e)
                 with self._lock:
@@ -244,6 +247,23 @@ class RemotePathMapper:
         return self.rel_from_local(path) is not None
 
 
+def _sftp_errno(exc: OSError) -> int | None:
+    err = getattr(exc, "errno", None)
+    return err if isinstance(err, int) else None
+
+
+def _is_not_found(exc: OSError) -> bool:
+    if isinstance(exc, FileNotFoundError):
+        return True
+    return _sftp_errno(exc) == errno.ENOENT
+
+
+def _is_permission_denied(exc: OSError) -> bool:
+    if isinstance(exc, PermissionError):
+        return True
+    return _sftp_errno(exc) in (errno.EACCES, errno.EPERM)
+
+
 def ensure_remote_dir(sftp: SFTPClient, remote_dir: str) -> None:
     remote_dir = posixpath.normpath(remote_dir)
     if remote_dir in ("", "/"):
@@ -254,8 +274,27 @@ def ensure_remote_dir(sftp: SFTPClient, remote_dir: str) -> None:
         current = f"/{part}" if not current else posixpath.join(current, part)
         try:
             st = sftp.stat(current)
-        except OSError:
-            sftp.mkdir(current)
+        except OSError as exc:
+            if not _is_not_found(exc):
+                if _is_permission_denied(exc):
+                    raise PermissionError(
+                        exc.errno,
+                        f"No hay permiso para acceder a la ruta remota '{current}'. "
+                        "Verifica que la ruta exista y pertenezca a tu área SFTP.",
+                    ) from exc
+                raise
+            try:
+                sftp.mkdir(current)
+            except OSError as mkdir_exc:
+                if _is_permission_denied(mkdir_exc):
+                    parent = posixpath.dirname(current) or "/"
+                    raise PermissionError(
+                        mkdir_exc.errno,
+                        f"No se puede crear el directorio remoto '{current}' (permiso denegado). "
+                        f"Tu usuario debe poder escribir en '{parent}'. "
+                        "Usa una ruta bajo tu home o un directorio que ya exista y te pertenezca.",
+                    ) from mkdir_exc
+                raise
             continue
         if not stat.S_ISDIR(st.st_mode):
             raise OSError(f"La ruta remota existe y no es un directorio: {current}")

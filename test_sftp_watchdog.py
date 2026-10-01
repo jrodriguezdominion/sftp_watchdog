@@ -46,8 +46,10 @@ class EnsureRemoteDirTests(unittest.TestCase):
         class FakeSftp:
             def stat(self, path: str):
                 if path not in stats:
-                    raise OSError("missing")
-                return mock.Mock()
+                    raise FileNotFoundError(2, "No such file")
+                attr = mock.Mock()
+                attr.st_mode = stat.S_IFDIR
+                return attr
 
             def mkdir(self, path: str) -> None:
                 created.append(path)
@@ -56,6 +58,37 @@ class EnsureRemoteDirTests(unittest.TestCase):
         stats.add("/")
         wd.ensure_remote_dir(FakeSftp(), "/remote/base/nested")  # type: ignore[arg-type]
         self.assertEqual(created, ["/remote", "/remote/base", "/remote/base/nested"])
+
+    def test_mkdir_permission_denied_message(self) -> None:
+        existing = {"/", "/uploads"}
+
+        class FakeSftp:
+            def stat(self, path: str):
+                if path in existing:
+                    attr = mock.Mock()
+                    attr.st_mode = stat.S_IFDIR
+                    return attr
+                raise FileNotFoundError(2, "No such file")
+
+            def mkdir(self, path: str) -> None:
+                raise PermissionError(13, "Permission denied")
+
+        with self.assertRaises(PermissionError) as ctx:
+            wd.ensure_remote_dir(FakeSftp(), "/uploads/new")  # type: ignore[arg-type]
+        msg = str(ctx.exception)
+        self.assertIn("/uploads/new", msg)
+        self.assertIn("/uploads", msg)
+
+    def test_stat_permission_denied_does_not_mkdir(self) -> None:
+        class FakeSftp:
+            def stat(self, path: str):
+                raise PermissionError(13, "Permission denied")
+
+            def mkdir(self, path: str) -> None:
+                raise AssertionError("mkdir should not be called")
+
+        with self.assertRaises(PermissionError):
+            wd.ensure_remote_dir(FakeSftp(), "/secret/dir")  # type: ignore[arg-type]
 
 
 class SftpSessionThreadSafetyTests(unittest.TestCase):
